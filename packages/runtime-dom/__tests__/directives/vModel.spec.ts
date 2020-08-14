@@ -5,7 +5,8 @@ import {
   defineComponent,
   vModelDynamic,
   withDirectives,
-  VNode
+  VNode,
+  ref
 } from '@vue/runtime-dom'
 
 const triggerEvent = (type: string, el: Element) => {
@@ -47,6 +48,7 @@ describe('vModel', () => {
 
     const input = root.querySelector('input')!
     const data = root._vnode.component.data
+    expect(input.value).toEqual('')
 
     input.value = 'foo'
     triggerEvent('input', input)
@@ -56,6 +58,76 @@ describe('vModel', () => {
     data.value = 'bar'
     await nextTick()
     expect(input.value).toEqual('bar')
+
+    data.value = undefined
+    await nextTick()
+    expect(input.value).toEqual('')
+  })
+
+  it('should work with multiple listeners', async () => {
+    const spy = jest.fn()
+    const component = defineComponent({
+      data() {
+        return { value: null }
+      },
+      render() {
+        return [
+          withVModel(
+            h('input', {
+              'onUpdate:modelValue': [setValue.bind(this), spy]
+            }),
+            this.value
+          )
+        ]
+      }
+    })
+    render(h(component), root)
+
+    const input = root.querySelector('input')!
+    const data = root._vnode.component.data
+
+    input.value = 'foo'
+    triggerEvent('input', input)
+    await nextTick()
+    expect(data.value).toEqual('foo')
+    expect(spy).toHaveBeenCalledWith('foo')
+  })
+
+  it('should work with updated listeners', async () => {
+    const spy1 = jest.fn()
+    const spy2 = jest.fn()
+    const toggle = ref(true)
+
+    const component = defineComponent({
+      render() {
+        return [
+          withVModel(
+            h('input', {
+              'onUpdate:modelValue': toggle.value ? spy1 : spy2
+            }),
+            'foo'
+          )
+        ]
+      }
+    })
+    render(h(component), root)
+
+    const input = root.querySelector('input')!
+
+    input.value = 'foo'
+    triggerEvent('input', input)
+    await nextTick()
+    expect(spy1).toHaveBeenCalledWith('foo')
+
+    // update listener
+    toggle.value = false
+    await nextTick()
+
+    input.value = 'bar'
+    triggerEvent('input', input)
+    await nextTick()
+    expect(spy1).not.toHaveBeenCalledWith('bar')
+    expect(spy2).toHaveBeenCalledWith('bar')
   })
 
   it('should work with textarea', async () => {
@@ -531,5 +603,46 @@ describe('vModel', () => {
     await nextTick()
     expect(foo.selected).toEqual(true)
     expect(bar.selected).toEqual(true)
+  })
+
+  it('should work with composition session', async () => {
+    const component = defineComponent({
+      data() {
+        return { value: '' }
+      },
+      render() {
+        return [
+          withVModel(
+            h('input', {
+              'onUpdate:modelValue': setValue.bind(this)
+            }),
+            this.value
+          )
+        ]
+      }
+    })
+    render(h(component), root)
+
+    const input = root.querySelector('input')!
+    const data = root._vnode.component.data
+    expect(input.value).toEqual('')
+
+    //developer.mozilla.org/en-US/docs/Web/API/Element/compositionstart_event
+    //compositionstart event could be fired after a user starts entering a Chinese character using a Pinyin IME
+    input.value = '使用拼音'
+    triggerEvent('compositionstart', input)
+    await nextTick()
+    expect(data.value).toEqual('')
+
+    // input event has no effect during composition session
+    input.value = '使用拼音输入'
+    triggerEvent('input', input)
+    await nextTick()
+    expect(data.value).toEqual('')
+
+    // After compositionend event being fired, an input event will be automatically trigger
+    triggerEvent('compositionend', input)
+    await nextTick()
+    expect(data.value).toEqual('使用拼音输入')
   })
 })

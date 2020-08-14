@@ -1,5 +1,5 @@
 export const FRAGMENT = Symbol(__DEV__ ? `Fragment` : ``)
-export const PORTAL = Symbol(__DEV__ ? `Portal` : ``)
+export const TELEPORT = Symbol(__DEV__ ? `Teleport` : ``)
 export const SUSPENSE = Symbol(__DEV__ ? `Suspense` : ``)
 export const KEEP_ALIVE = Symbol(__DEV__ ? `KeepAlive` : ``)
 export const BASE_TRANSITION = Symbol(__DEV__ ? `BaseTransition` : ``)
@@ -22,6 +22,7 @@ export const TO_DISPLAY_STRING = Symbol(__DEV__ ? `toDisplayString` : ``)
 export const MERGE_PROPS = Symbol(__DEV__ ? `mergeProps` : ``)
 export const TO_HANDLERS = Symbol(__DEV__ ? `toHandlers` : ``)
 export const CAMELIZE = Symbol(__DEV__ ? `camelize` : ``)
+export const CAPITALIZE = Symbol(__DEV__ ? `capitalize` : ``)
 export const SET_BLOCK_TRACKING = Symbol(__DEV__ ? `setBlockTracking` : ``)
 export const PUSH_SCOPE_ID = Symbol(__DEV__ ? `pushScopeId` : ``)
 export const POP_SCOPE_ID = Symbol(__DEV__ ? `popScopeId` : ``)
@@ -33,7 +34,7 @@ export const WITH_CTX = Symbol(__DEV__ ? `withCtx` : ``)
 // Using `any` here because TS doesn't allow symbols as index type.
 export const helperNameMap: any = {
   [FRAGMENT]: `Fragment`,
-  [PORTAL]: `Portal`,
+  [TELEPORT]: `Teleport`,
   [SUSPENSE]: `Suspense`,
   [KEEP_ALIVE]: `KeepAlive`,
   [BASE_TRANSITION]: `BaseTransition`,
@@ -54,6 +55,7 @@ export const helperNameMap: any = {
   [MERGE_PROPS]: `mergeProps`,
   [TO_HANDLERS]: `toHandlers`,
   [CAMELIZE]: `camelize`,
+  [CAPITALIZE]: `capitalize`,
   [SET_BLOCK_TRACKING]: `setBlockTracking`,
   [PUSH_SCOPE_ID]: `pushScopeId`,
   [POP_SCOPE_ID]: `popScopeId`,

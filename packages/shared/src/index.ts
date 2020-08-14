@@ -3,14 +3,27 @@ import { makeMap } from './makeMap'
 export { makeMap }
 export * from './patchFlags'
 export * from './shapeFlags'
+export * from './slotFlags'
 export * from './globalsWhitelist'
 export * from './codeframe'
-export * from './mockWarn'
 export * from './normalizeProp'
 export * from './domTagConfig'
 export * from './domAttrConfig'
 export * from './escapeHtml'
 export * from './looseEqual'
+export * from './toDisplayString'
+
+/**
+ * List of @babel/parser plugins that are used for template expression
+ * transforms and SFC script transforms. By default we enable proposals slated
+ * for ES2020. This will need to be updated as the spec moves forward.
+ * Full list at https://babeljs.io/docs/en/next/babel-parser#plugins
+ */
+export const babelParserDefautPlugins = [
+  'bigInt',
+  'optionalChaining',
+  'nullishCoalescingOperator'
+] as const
 
 export const EMPTY_OBJ: { readonly [key: string]: any } = __DEV__
   ? Object.freeze({})
@@ -24,17 +37,12 @@ export const NOOP = () => {}
  */
 export const NO = () => false
 
-export const isOn = (key: string) => key[0] === 'o' && key[1] === 'n'
+const onRE = /^on[^a-z]/
+export const isOn = (key: string) => onRE.test(key)
 
-export const extend = <T extends object, U extends object>(
-  a: T,
-  b: U
-): T & U => {
-  for (const key in b) {
-    ;(a as any)[key] = b[key]
-  }
-  return a as any
-}
+export const isModelListener = (key: string) => key.startsWith('onUpdate:')
+
+export const extend = Object.assign
 
 export const remove = <T>(arr: T[], el: T) => {
   const i = arr.indexOf(el)
@@ -50,6 +58,7 @@ export const hasOwn = (
 ): key is keyof typeof val => hasOwnProperty.call(val, key)
 
 export const isArray = Array.isArray
+export const isDate = (val: unknown): val is Date => val instanceof Date
 export const isFunction = (val: unknown): val is Function =>
   typeof val === 'function'
 export const isString = (val: unknown): val is string => typeof val === 'string'
@@ -88,6 +97,9 @@ const cacheStringFunction = <T extends (str: string) => string>(fn: T): T => {
 }
 
 const camelizeRE = /-(\w)/g
+/**
+ * @private
+ */
 export const camelize = cacheStringFunction(
   (str: string): string => {
     return str.replace(camelizeRE, (_, c) => (c ? c.toUpperCase() : ''))
@@ -95,12 +107,18 @@ export const camelize = cacheStringFunction(
 )
 
 const hyphenateRE = /\B([A-Z])/g
+/**
+ * @private
+ */
 export const hyphenate = cacheStringFunction(
   (str: string): string => {
     return str.replace(hyphenateRE, '-$1').toLowerCase()
   }
 )
 
+/**
+ * @private
+ */
 export const capitalize = cacheStringFunction(
   (str: string): string => {
     return str.charAt(0).toUpperCase() + str.slice(1)
@@ -111,11 +129,38 @@ export const capitalize = cacheStringFunction(
 export const hasChanged = (value: any, oldValue: any): boolean =>
   value !== oldValue && (value === value || oldValue === oldValue)
 
-// for converting {{ interpolation }} values to displayed strings.
-export const toDisplayString = (val: unknown): string => {
-  return val == null
-    ? ''
-    : isArray(val) || (isPlainObject(val) && val.toString === objectToString)
-      ? JSON.stringify(val, null, 2)
-      : String(val)
+export const invokeArrayFns = (fns: Function[], arg?: any) => {
+  for (let i = 0; i < fns.length; i++) {
+    fns[i](arg)
+  }
+}
+
+export const def = (obj: object, key: string | symbol, value: any) => {
+  Object.defineProperty(obj, key, {
+    configurable: true,
+    enumerable: false,
+    value
+  })
+}
+
+export const toNumber = (val: any): any => {
+  const n = parseFloat(val)
+  return isNaN(n) ? val : n
+}
+
+let _globalThis: any
+export const getGlobalThis = (): any => {
+  return (
+    _globalThis ||
+    (_globalThis =
+      typeof globalThis !== 'undefined'
+        ? globalThis
+        : typeof self !== 'undefined'
+          ? self
+          : typeof window !== 'undefined'
+            ? window
+            : typeof global !== 'undefined'
+              ? global
+              : {})
+  )
 }

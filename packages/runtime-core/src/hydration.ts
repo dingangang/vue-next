@@ -8,23 +8,17 @@ import {
   VNodeHook
 } from './vnode'
 import { flushPostFlushCbs } from './scheduler'
-import { ComponentInternalInstance } from './component'
+import { ComponentOptions, ComponentInternalInstance } from './component'
 import { invokeDirectiveHook } from './directives'
 import { warn } from './warning'
-import {
-  PatchFlags,
-  ShapeFlags,
-  isReservedProp,
-  isOn,
-  isString
-} from '@vue/shared'
-import { RendererInternals, invokeVNodeHook } from './renderer'
+import { PatchFlags, ShapeFlags, isReservedProp, isOn } from '@vue/shared'
+import { RendererInternals, invokeVNodeHook, setRef } from './renderer'
 import {
   SuspenseImpl,
   SuspenseBoundary,
   queueEffectWithSuspense
 } from './components/Suspense'
-import { ComponentOptions } from './apiOptions'
+import { TeleportImpl, TeleportVNode } from './components/Teleport'
 
 export type RootHydrateFunction = (
   vnode: VNode<Node, Element>,
@@ -86,7 +80,7 @@ export function createHydrationFunctions(
   ): Node | null => {
     const isFragmentStart = isComment(node) && node.data === '['
     const onMismatch = () =>
-      handleMismtach(
+      handleMismatch(
         node,
         vnode,
         parentComponent,
@@ -94,62 +88,85 @@ export function createHydrationFunctions(
         isFragmentStart
       )
 
-    const { type, shapeFlag } = vnode
+    const { type, ref, shapeFlag } = vnode
     const domType = node.nodeType
     vnode.el = node
 
+    let nextNode: Node | null = null
     switch (type) {
       case Text:
         if (domType !== DOMNodeTypes.TEXT) {
-          return onMismatch()
+          nextNode = onMismatch()
+        } else {
+          if ((node as Text).data !== vnode.children) {
+            hasMismatch = true
+            __DEV__ &&
+              warn(
+                `Hydration text mismatch:` +
+                  `\n- Client: ${JSON.stringify((node as Text).data)}` +
+                  `\n- Server: ${JSON.stringify(vnode.children)}`
+              )
+            ;(node as Text).data = vnode.children as string
+          }
+          nextNode = nextSibling(node)
         }
-        if ((node as Text).data !== vnode.children) {
-          hasMismatch = true
-          __DEV__ &&
-            warn(
-              `Hydration text mismatch:` +
-                `\n- Client: ${JSON.stringify(vnode.children)}`,
-              `\n- Server: ${JSON.stringify((node as Text).data)}`
-            )
-          ;(node as Text).data = vnode.children as string
-        }
-        return nextSibling(node)
+        break
       case Comment:
         if (domType !== DOMNodeTypes.COMMENT || isFragmentStart) {
-          return onMismatch()
+          nextNode = onMismatch()
+        } else {
+          nextNode = nextSibling(node)
         }
-        return nextSibling(node)
+        break
       case Static:
         if (domType !== DOMNodeTypes.ELEMENT) {
-          return onMismatch()
+          nextNode = onMismatch()
+        } else {
+          // determine anchor, adopt content
+          nextNode = node
+          // if the static vnode has its content stripped during build,
+          // adopt it from the server-rendered HTML.
+          const needToAdoptContent = !(vnode.children as string).length
+          for (let i = 0; i < vnode.staticCount; i++) {
+            if (needToAdoptContent)
+              vnode.children += (nextNode as Element).outerHTML
+            if (i === vnode.staticCount - 1) {
+              vnode.anchor = nextNode
+            }
+            nextNode = nextSibling(nextNode)!
+          }
+          return nextNode
         }
-        return nextSibling(node)
+        break
       case Fragment:
         if (!isFragmentStart) {
-          return onMismatch()
+          nextNode = onMismatch()
+        } else {
+          nextNode = hydrateFragment(
+            node as Comment,
+            vnode,
+            parentComponent,
+            parentSuspense,
+            optimized
+          )
         }
-        return hydrateFragment(
-          node as Comment,
-          vnode,
-          parentComponent,
-          parentSuspense,
-          optimized
-        )
+        break
       default:
         if (shapeFlag & ShapeFlags.ELEMENT) {
           if (
             domType !== DOMNodeTypes.ELEMENT ||
             vnode.type !== (node as Element).tagName.toLowerCase()
           ) {
-            return onMismatch()
+            nextNode = onMismatch()
+          } else {
+            nextNode = hydrateElement(
+              node as Element,
+              vnode,
+              parentComponent,
+              parentSuspense,
+              optimized
+            )
           }
-          return hydrateElement(
-            node as Element,
-            vnode,
-            parentComponent,
-            parentSuspense,
-            optimized
-          )
         } else if (shapeFlag & ShapeFlags.COMPONENT) {
           // when setting up the render effect, if the initial vnode already
           // has .el set, the component will perform hydration instead of mount
@@ -162,7 +179,8 @@ export function createHydrationFunctions(
               null,
               parentComponent,
               parentSuspense,
-              isSVGContainer(container)
+              isSVGContainer(container),
+              optimized
             )
           }
           // async component
@@ -175,17 +193,25 @@ export function createHydrationFunctions(
           // component may be async, so in the case of fragments we cannot rely
           // on component's rendered output to determine the end of the fragment
           // instead, we do a lookahead to find the end anchor node.
-          return isFragmentStart
+          nextNode = isFragmentStart
             ? locateClosingAsyncAnchor(node)
             : nextSibling(node)
-        } else if (shapeFlag & ShapeFlags.PORTAL) {
+        } else if (shapeFlag & ShapeFlags.TELEPORT) {
           if (domType !== DOMNodeTypes.COMMENT) {
-            return onMismatch()
+            nextNode = onMismatch()
+          } else {
+            nextNode = (vnode.type as typeof TeleportImpl).hydrate(
+              node,
+              vnode as TeleportVNode,
+              parentComponent,
+              parentSuspense,
+              optimized,
+              rendererInternals,
+              hydrateChildren
+            )
           }
-          hydratePortal(vnode, parentComponent, parentSuspense, optimized)
-          return nextSibling(node)
         } else if (__FEATURE_SUSPENSE__ && shapeFlag & ShapeFlags.SUSPENSE) {
-          return (vnode.type as typeof SuspenseImpl).hydrate(
+          nextNode = (vnode.type as typeof SuspenseImpl).hydrate(
             node,
             vnode,
             parentComponent,
@@ -198,8 +224,13 @@ export function createHydrationFunctions(
         } else if (__DEV__) {
           warn('Invalid HostVNode type:', type, `(${typeof type})`)
         }
-        return null
     }
+
+    if (ref != null && parentComponent) {
+      setRef(ref, null, parentComponent, parentSuspense, vnode)
+    }
+
+    return nextNode
   }
 
   const hydrateElement = (
@@ -366,48 +397,13 @@ export function createHydrationFunctions(
     }
   }
 
-  interface PortalTargetElement extends Element {
-    // last portal target
-    _lpa?: Node | null
-  }
-
-  const hydratePortal = (
-    vnode: VNode,
-    parentComponent: ComponentInternalInstance | null,
-    parentSuspense: SuspenseBoundary | null,
-    optimized: boolean
-  ) => {
-    const targetSelector = vnode.props && vnode.props.target
-    const target = (vnode.target = isString(targetSelector)
-      ? document.querySelector(targetSelector)
-      : targetSelector)
-    if (target && vnode.shapeFlag & ShapeFlags.ARRAY_CHILDREN) {
-      vnode.anchor = hydrateChildren(
-        // if multiple portals rendered to the same target element, we need to
-        // pick up from where the last portal finished instead of the first node
-        (target as PortalTargetElement)._lpa || target.firstChild,
-        vnode,
-        target,
-        parentComponent,
-        parentSuspense,
-        optimized
-      )
-      ;(target as PortalTargetElement)._lpa = nextSibling(vnode.anchor as Node)
-    } else if (__DEV__) {
-      warn(
-        `Attempting to hydrate portal but target ${targetSelector} does not ` +
-          `exist in server-rendered markup.`
-      )
-    }
-  }
-
-  const handleMismtach = (
+  const handleMismatch = (
     node: Node,
     vnode: VNode,
     parentComponent: ComponentInternalInstance | null,
     parentSuspense: SuspenseBoundary | null,
     isFragment: boolean
-  ) => {
+  ): Node | null => {
     hasMismatch = true
     __DEV__ &&
       warn(

@@ -20,7 +20,13 @@ import {
   DirectiveArguments,
   createVNodeCall
 } from '../ast'
-import { PatchFlags, PatchFlagNames, isSymbol, isOn } from '@vue/shared'
+import {
+  PatchFlags,
+  PatchFlagNames,
+  isSymbol,
+  isOn,
+  isObject
+} from '@vue/shared'
 import { createCompilerError, ErrorCodes } from '../errors'
 import {
   RESOLVE_DIRECTIVE,
@@ -28,8 +34,9 @@ import {
   RESOLVE_DYNAMIC_COMPONENT,
   MERGE_PROPS,
   TO_HANDLERS,
-  PORTAL,
-  KEEP_ALIVE
+  TELEPORT,
+  KEEP_ALIVE,
+  SUSPENSE
 } from '../runtimeHelpers'
 import {
   getInnerRange,
@@ -37,10 +44,11 @@ import {
   findProp,
   isCoreComponent,
   isBindKey,
-  findDir
+  findDir,
+  isStaticExp
 } from '../utils'
 import { buildSlots } from './vSlot'
-import { isStaticNode } from './hoistStatic'
+import { getStaticType } from './hoistStatic'
 
 // some directive transforms (e.g. v-model) may return a symbol for runtime
 // import, which should be used instead of a resolveDirective call.
@@ -68,6 +76,8 @@ export const transformElement: NodeTransform = (node, context) => {
     const vnodeTag = isComponent
       ? resolveComponentType(node as ComponentNode, context)
       : `"${tag}"`
+    const isDynamicComponent =
+      isObject(vnodeTag) && vnodeTag.callee === RESOLVE_DYNAMIC_COMPONENT
 
     let vnodeProps: VNodeCall['props']
     let vnodeChildren: VNodeCall['children']
@@ -77,12 +87,20 @@ export const transformElement: NodeTransform = (node, context) => {
     let dynamicPropNames: string[] | undefined
     let vnodeDirectives: VNodeCall['directives']
 
-    // <svg> and <foreignObject> must be forced into blocks so that block
-    // updates inside get proper isSVG flag at runtime. (#639, #643)
-    // This is technically web-specific, but splitting the logic out of core
-    // leads to too much unnecessary complexity.
     let shouldUseBlock =
-      !isComponent && (tag === 'svg' || tag === 'foreignObject')
+      // dynamic component may resolve to plain elements
+      isDynamicComponent ||
+      vnodeTag === TELEPORT ||
+      vnodeTag === SUSPENSE ||
+      (!isComponent &&
+        // <svg> and <foreignObject> must be forced into blocks so that block
+        // updates inside get proper isSVG flag at runtime. (#639, #643)
+        // This is technically web-specific, but splitting the logic out of core
+        // leads to too much unnecessary complexity.
+        (tag === 'svg' ||
+          tag === 'foreignObject' ||
+          // #938: elements with dynamic keys should be forced into blocks
+          findProp(node, 'key', true)))
 
     // props
     if (props.length > 0) {
@@ -124,8 +142,8 @@ export const transformElement: NodeTransform = (node, context) => {
 
       const shouldBuildAsSlots =
         isComponent &&
-        // Portal is not a real component and has dedicated runtime handling
-        vnodeTag !== PORTAL &&
+        // Teleport is not a real component and has dedicated runtime handling
+        vnodeTag !== TELEPORT &&
         // explained above.
         vnodeTag !== KEEP_ALIVE
 
@@ -135,14 +153,14 @@ export const transformElement: NodeTransform = (node, context) => {
         if (hasDynamicSlots) {
           patchFlag |= PatchFlags.DYNAMIC_SLOTS
         }
-      } else if (node.children.length === 1 && vnodeTag !== PORTAL) {
+      } else if (node.children.length === 1 && vnodeTag !== TELEPORT) {
         const child = node.children[0]
         const type = child.type
         // check for dynamic text children
         const hasDynamicTextChild =
           type === NodeTypes.INTERPOLATION ||
           type === NodeTypes.COMPOUND_EXPRESSION
-        if (hasDynamicTextChild && !isStaticNode(child)) {
+        if (hasDynamicTextChild && !getStaticType(child)) {
           patchFlag |= PatchFlags.TEXT
         }
         // pass directly if the only child is a text node
@@ -188,8 +206,8 @@ export const transformElement: NodeTransform = (node, context) => {
       vnodePatchFlag,
       vnodeDynamicProps,
       vnodeDirectives,
-      shouldUseBlock,
-      false /* isForBlock */,
+      !!shouldUseBlock,
+      false /* disableTracking */,
       node.loc
     )
   }
@@ -217,7 +235,7 @@ export function resolveComponentType(
     }
   }
 
-  // 2. built-in components (Portal, Transition, KeepAlive, Suspense...)
+  // 2. built-in components (Teleport, Transition, KeepAlive, Suspense...)
   const builtIn = isCoreComponent(tag) || context.isBuiltInComponent(tag)
   if (builtIn) {
     // built-ins are simply fallthroughs / have special handling during ssr
@@ -226,7 +244,12 @@ export function resolveComponentType(
     return builtIn
   }
 
-  // 3. user component (resolve)
+  // 3. user component (from setup bindings)
+  if (context.bindingMetadata[tag] === 'setup') {
+    return `$setup[${JSON.stringify(tag)}]`
+  }
+
+  // 4. user component (resolve)
   context.helper(RESOLVE_COMPONENT)
   context.components.add(tag)
   return toValidAssetId(tag, `component`)
@@ -261,12 +284,12 @@ export function buildProps(
   const dynamicPropNames: string[] = []
 
   const analyzePatchFlag = ({ key, value }: Property) => {
-    if (key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic) {
+    if (isStaticExp(key)) {
       const name = key.content
       if (
         !isComponent &&
         isOn(name) &&
-        // omit the flag for click handlers becaues hydration gives click
+        // omit the flag for click handlers because hydration gives click
         // dedicated fast path.
         name.toLowerCase() !== 'onclick' &&
         // omit v-model handlers
@@ -278,16 +301,16 @@ export function buildProps(
         value.type === NodeTypes.JS_CACHE_EXPRESSION ||
         ((value.type === NodeTypes.SIMPLE_EXPRESSION ||
           value.type === NodeTypes.COMPOUND_EXPRESSION) &&
-          isStaticNode(value))
+          getStaticType(value) > 0)
       ) {
         // skip if the prop is a cached handler or has constant value
         return
       }
       if (name === 'ref') {
         hasRef = true
-      } else if (name === 'class') {
+      } else if (name === 'class' && !isComponent) {
         hasClassBinding = true
-      } else if (name === 'style') {
+      } else if (name === 'style' && !isComponent) {
         hasStyleBinding = true
       } else if (name !== 'key' && !dynamicPropNames.includes(name)) {
         dynamicPropNames.push(name)

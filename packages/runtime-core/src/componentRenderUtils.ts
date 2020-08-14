@@ -8,11 +8,15 @@ import {
   normalizeVNode,
   createVNode,
   Comment,
-  cloneVNode
+  cloneVNode,
+  Fragment,
+  VNodeArrayChildren,
+  isVNode
 } from './vnode'
 import { handleError, ErrorCodes } from './errorHandling'
-import { PatchFlags, ShapeFlags, EMPTY_OBJ, isOn } from '@vue/shared'
+import { PatchFlags, ShapeFlags, isOn, isModelListener } from '@vue/shared'
 import { warn } from './warning'
+import { isHmrUpdating } from './hmr'
 
 // mark the current rendering instance for asset resolution (e.g.
 // resolveComponent, resolveDirective) during render
@@ -46,7 +50,11 @@ export function renderComponentRoot(
     slots,
     attrs,
     emit,
-    renderCache
+    render,
+    renderCache,
+    data,
+    setupState,
+    ctx
   } = instance
 
   let result
@@ -55,78 +63,156 @@ export function renderComponentRoot(
     accessedAttrs = false
   }
   try {
+    let fallthroughAttrs
     if (vnode.shapeFlag & ShapeFlags.STATEFUL_COMPONENT) {
       // withProxy is a proxy with a different `has` trap only for
       // runtime-compiled render functions using `with` block.
       const proxyToUse = withProxy || proxy
       result = normalizeVNode(
-        instance.render!.call(proxyToUse, proxyToUse!, renderCache)
+        render!.call(
+          proxyToUse,
+          proxyToUse!,
+          renderCache,
+          props,
+          setupState,
+          data,
+          ctx
+        )
       )
+      fallthroughAttrs = attrs
     } else {
       // functional
       const render = Component as FunctionalComponent
+      // in dev, mark attrs accessed if optional props (attrs === props)
+      if (__DEV__ && attrs === props) {
+        markAttrsAccessed()
+      }
       result = normalizeVNode(
         render.length > 1
-          ? render(props, {
-              attrs,
-              slots,
-              emit
-            })
+          ? render(
+              props,
+              __DEV__
+                ? {
+                    get attrs() {
+                      markAttrsAccessed()
+                      return attrs
+                    },
+                    slots,
+                    emit
+                  }
+                : { attrs, slots, emit }
+            )
           : render(props, null as any /* we know it doesn't need it */)
       )
+      fallthroughAttrs = Component.props
+        ? attrs
+        : getFunctionalFallthrough(attrs)
     }
 
     // attr merging
-    let fallthroughAttrs
-    if (
-      Component.inheritAttrs !== false &&
-      attrs !== EMPTY_OBJ &&
-      (fallthroughAttrs = getFallthroughAttrs(attrs))
-    ) {
-      if (
-        result.shapeFlag & ShapeFlags.ELEMENT ||
-        result.shapeFlag & ShapeFlags.COMPONENT
-      ) {
-        result = cloneVNode(result, fallthroughAttrs)
-        // If the child root node is a compiler optimized vnode, make sure it
-        // force update full props to account for the merged attrs.
-        if (result.dynamicChildren) {
-          result.patchFlag |= PatchFlags.FULL_PROPS
+    // in dev mode, comments are preserved, and it's possible for a template
+    // to have comments along side the root element which makes it a fragment
+    let root = result
+    let setRoot: ((root: VNode) => void) | undefined = undefined
+    if (__DEV__) {
+      ;[root, setRoot] = getChildRoot(result)
+    }
+
+    if (Component.inheritAttrs !== false && fallthroughAttrs) {
+      const keys = Object.keys(fallthroughAttrs)
+      const { shapeFlag } = root
+      if (keys.length) {
+        if (
+          shapeFlag & ShapeFlags.ELEMENT ||
+          shapeFlag & ShapeFlags.COMPONENT
+        ) {
+          if (shapeFlag & ShapeFlags.ELEMENT && keys.some(isModelListener)) {
+            // #1643, #1543
+            // component v-model listeners should only fallthrough for component
+            // HOCs
+            fallthroughAttrs = filterModelListeners(fallthroughAttrs)
+          }
+          root = cloneVNode(root, fallthroughAttrs)
+        } else if (__DEV__ && !accessedAttrs && root.type !== Comment) {
+          const allAttrs = Object.keys(attrs)
+          const eventAttrs: string[] = []
+          const extraAttrs: string[] = []
+          for (let i = 0, l = allAttrs.length; i < l; i++) {
+            const key = allAttrs[i]
+            if (isOn(key)) {
+              // ignore v-model handlers when they fail to fallthrough
+              if (!isModelListener(key)) {
+                // remove `on`, lowercase first letter to reflect event casing
+                // accurately
+                eventAttrs.push(key[2].toLowerCase() + key.slice(3))
+              }
+            } else {
+              extraAttrs.push(key)
+            }
+          }
+          if (extraAttrs.length) {
+            warn(
+              `Extraneous non-props attributes (` +
+                `${extraAttrs.join(', ')}) ` +
+                `were passed to component but could not be automatically inherited ` +
+                `because component renders fragment or text root nodes.`
+            )
+          }
+          if (eventAttrs.length) {
+            warn(
+              `Extraneous non-emits event listeners (` +
+                `${eventAttrs.join(', ')}) ` +
+                `were passed to component but could not be automatically inherited ` +
+                `because component renders fragment or text root nodes. ` +
+                `If the listener is intended to be a component custom event listener only, ` +
+                `declare it using the "emits" option.`
+            )
+          }
         }
-      } else if (__DEV__ && !accessedAttrs && result.type !== Comment) {
-        warn(
-          `Extraneous non-props attributes (` +
-            `${Object.keys(attrs).join(', ')}) ` +
-            `were passed to component but could not be automatically inherited ` +
-            `because component renders fragment or text root nodes.`
-        )
       }
     }
 
     // inherit scopeId
-    const parentScopeId = parent && parent.type.__scopeId
-    if (parentScopeId) {
-      result = cloneVNode(result, { [parentScopeId]: '' })
+    const scopeId = vnode.scopeId
+    // vite#536: if subtree root is created from parent slot if would already
+    // have the correct scopeId, in this case adding the scopeId will cause
+    // it to be removed if the original slot vnode is reused.
+    const needScopeId = scopeId && root.scopeId !== scopeId
+    const treeOwnerId = parent && parent.type.__scopeId
+    const slotScopeId =
+      treeOwnerId && treeOwnerId !== scopeId ? treeOwnerId + '-s' : null
+    if (needScopeId || slotScopeId) {
+      const extras: Data = {}
+      if (needScopeId) extras[scopeId!] = ''
+      if (slotScopeId) extras[slotScopeId] = ''
+      root = cloneVNode(root, extras)
     }
+
     // inherit directives
     if (vnode.dirs) {
-      if (__DEV__ && !isElementRoot(result)) {
+      if (__DEV__ && !isElementRoot(root)) {
         warn(
           `Runtime directive used on component with non-element root node. ` +
             `The directives will not function as intended.`
         )
       }
-      result.dirs = vnode.dirs
+      root.dirs = vnode.dirs
     }
     // inherit transition data
     if (vnode.transition) {
-      if (__DEV__ && !isElementRoot(result)) {
+      if (__DEV__ && !isElementRoot(root)) {
         warn(
           `Component inside <Transition> renders non-element root node ` +
             `that cannot be animated.`
         )
       }
-      result.transition = vnode.transition
+      root.transition = vnode.transition
+    }
+
+    if (__DEV__ && setRoot) {
+      setRoot(root)
+    } else {
+      result = root
     }
   } catch (err) {
     handleError(err, instance, ErrorCodes.RENDER_FUNCTION)
@@ -137,18 +223,56 @@ export function renderComponentRoot(
   return result
 }
 
-const getFallthroughAttrs = (attrs: Data): Data | undefined => {
+/**
+ * dev only
+ */
+const getChildRoot = (
+  vnode: VNode
+): [VNode, ((root: VNode) => void) | undefined] => {
+  if (vnode.type !== Fragment) {
+    return [vnode, undefined]
+  }
+  const rawChildren = vnode.children as VNodeArrayChildren
+  const dynamicChildren = vnode.dynamicChildren as VNodeArrayChildren
+  const children = rawChildren.filter(child => {
+    return !(
+      isVNode(child) &&
+      child.type === Comment &&
+      child.children !== 'v-if'
+    )
+  })
+  if (children.length !== 1) {
+    return [vnode, undefined]
+  }
+  const childRoot = children[0]
+  const index = rawChildren.indexOf(childRoot)
+  const dynamicIndex = dynamicChildren ? dynamicChildren.indexOf(childRoot) : -1
+  const setRoot = (updatedRoot: VNode) => {
+    rawChildren[index] = updatedRoot
+    if (dynamicIndex > -1) {
+      dynamicChildren[dynamicIndex] = updatedRoot
+    } else if (dynamicChildren && updatedRoot.patchFlag > 0) {
+      dynamicChildren.push(updatedRoot)
+    }
+  }
+  return [normalizeVNode(childRoot), setRoot]
+}
+
+const getFunctionalFallthrough = (attrs: Data): Data | undefined => {
   let res: Data | undefined
   for (const key in attrs) {
-    if (
-      key === 'class' ||
-      key === 'style' ||
-      key === 'role' ||
-      isOn(key) ||
-      key.indexOf('aria-') === 0 ||
-      key.indexOf('data-') === 0
-    ) {
+    if (key === 'class' || key === 'style' || isOn(key)) {
       ;(res || (res = {}))[key] = attrs[key]
+    }
+  }
+  return res
+}
+
+const filterModelListeners = (attrs: Data): Data => {
+  const res: Data = {}
+  for (const key in attrs) {
+    if (!isModelListener(key)) {
+      res[key] = attrs[key]
     }
   }
   return res
@@ -165,7 +289,6 @@ const isElementRoot = (vnode: VNode) => {
 export function shouldUpdateComponent(
   prevVNode: VNode,
   nextVNode: VNode,
-  parentComponent: ComponentInternalInstance | null,
   optimized?: boolean
 ): boolean {
   const { props: prevProps, children: prevChildren } = prevVNode
@@ -174,48 +297,37 @@ export function shouldUpdateComponent(
   // Parent component's render function was hot-updated. Since this may have
   // caused the child component's slots content to have changed, we need to
   // force the child to update as well.
-  if (
-    __BUNDLER__ &&
-    __DEV__ &&
-    (prevChildren || nextChildren) &&
-    parentComponent &&
-    parentComponent.renderUpdated
-  ) {
+  if (__DEV__ && (prevChildren || nextChildren) && isHmrUpdating) {
     return true
   }
 
-  // force child update on runtime directive usage on component vnode.
-  if (nextVNode.dirs) {
+  // force child update for runtime directive or transition on component vnode.
+  if (nextVNode.dirs || nextVNode.transition) {
     return true
   }
 
-  if (patchFlag > 0) {
+  if (optimized && patchFlag > 0) {
     if (patchFlag & PatchFlags.DYNAMIC_SLOTS) {
       // slot content that references values that might have changed,
       // e.g. in a v-for
       return true
     }
     if (patchFlag & PatchFlags.FULL_PROPS) {
+      if (!prevProps) {
+        return !!nextProps
+      }
       // presence of this flag indicates props are always non-null
-      return hasPropsChanged(prevProps!, nextProps!)
-    } else {
-      if (patchFlag & PatchFlags.CLASS) {
-        return prevProps!.class !== nextProps!.class
-      }
-      if (patchFlag & PatchFlags.STYLE) {
-        return hasPropsChanged(prevProps!.style, nextProps!.style)
-      }
-      if (patchFlag & PatchFlags.PROPS) {
-        const dynamicProps = nextVNode.dynamicProps!
-        for (let i = 0; i < dynamicProps.length; i++) {
-          const key = dynamicProps[i]
-          if (nextProps![key] !== prevProps![key]) {
-            return true
-          }
+      return hasPropsChanged(prevProps, nextProps!)
+    } else if (patchFlag & PatchFlags.PROPS) {
+      const dynamicProps = nextVNode.dynamicProps!
+      for (let i = 0; i < dynamicProps.length; i++) {
+        const key = dynamicProps[i]
+        if (nextProps![key] !== prevProps![key]) {
+          return true
         }
       }
     }
-  } else if (!optimized) {
+  } else {
     // this path is only taken by manually written render functions
     // so presence of any children leads to a forced update
     if (prevChildren || nextChildren) {

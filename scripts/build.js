@@ -36,6 +36,10 @@ const commit = execa.sync('git', ['rev-parse', 'HEAD']).stdout.slice(0, 7)
 run()
 
 async function run() {
+  if (isRelease) {
+    // remove build cache for release builds to avoid outdated enum values
+    await fs.remove(path.resolve(__dirname, '../node_modules/.rts2_cache'))
+  }
   if (!targets.length) {
     await buildAll(allTargets)
     checkAllSizes(allTargets)
@@ -101,19 +105,21 @@ async function build(target) {
     const extractorConfig = ExtractorConfig.loadFileAndPrepare(
       extractorConfigPath
     )
-    const result = Extractor.invoke(extractorConfig, {
+    const extractorResult = Extractor.invoke(extractorConfig, {
       localBuild: true,
       showVerboseMessages: true
     })
 
-    if (result.succeeded) {
-      // concat additional d.ts to rolled-up dts (mostly for JSX)
-      if (pkg.buildOptions && pkg.buildOptions.dts) {
+    if (extractorResult.succeeded) {
+      // concat additional d.ts to rolled-up dts
+      const typesDir = path.resolve(pkgDir, 'types')
+      if (await fs.exists(typesDir)) {
         const dtsPath = path.resolve(pkgDir, pkg.types)
         const existing = await fs.readFile(dtsPath, 'utf-8')
+        const typeFiles = await fs.readdir(typesDir)
         const toAdd = await Promise.all(
-          pkg.buildOptions.dts.map(file => {
-            return fs.readFile(path.resolve(pkgDir, file), 'utf-8')
+          typeFiles.map(file => {
+            return fs.readFile(path.resolve(typesDir, file), 'utf-8')
           })
         )
         await fs.writeFile(dtsPath, existing + '\n' + toAdd.join('\n'))
@@ -147,7 +153,6 @@ function checkAllSizes(targets) {
 function checkSize(target) {
   const pkgDir = path.resolve(`packages/${target}`)
   checkFileSize(`${pkgDir}/dist/${target}.global.prod.js`)
-  checkFileSize(`${pkgDir}/dist/${target}.runtime.global.prod.js`)
 }
 
 function checkFileSize(filePath) {

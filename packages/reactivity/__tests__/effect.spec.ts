@@ -6,8 +6,7 @@ import {
   TrackOpTypes,
   TriggerOpTypes,
   DebuggerEvent,
-  markNonReactive,
-  ref
+  markRaw
 } from '../src/index'
 import { ITERATE_KEY } from '../src/effect'
 
@@ -678,6 +677,28 @@ describe('reactivity/effect', () => {
     expect(dummy).toBe(3)
   })
 
+  it('stop with scheduler', () => {
+    let dummy
+    const obj = reactive({ prop: 1 })
+    const queue: (() => void)[] = []
+    const runner = effect(
+      () => {
+        dummy = obj.prop
+      },
+      {
+        scheduler: e => queue.push(e)
+      }
+    )
+    obj.prop = 2
+    expect(dummy).toBe(1)
+    expect(queue.length).toBe(1)
+    stop(runner)
+
+    // a scheduled effect should not execute anymore after stopped
+    queue.forEach(e => e())
+    expect(dummy).toBe(1)
+  })
+
   it('events: onStop', () => {
     const onStop = jest.fn()
     const runner = effect(() => {}, {
@@ -710,9 +731,9 @@ describe('reactivity/effect', () => {
     expect(dummy).toBe(3)
   })
 
-  it('markNonReactive', () => {
+  it('markRaw', () => {
     const obj = reactive({
-      foo: markNonReactive({
+      foo: markRaw({
         prop: 0
       })
     })
@@ -737,7 +758,7 @@ describe('reactivity/effect', () => {
     expect(fnSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('should trigger all effects when array lenght is set 0', () => {
+  it('should trigger all effects when array length is set to 0', () => {
     const observed: any = reactive([1])
     let dummy, record
     effect(() => {
@@ -759,15 +780,5 @@ describe('reactivity/effect', () => {
     observed.length = 0
     expect(dummy).toBe(0)
     expect(record).toBeUndefined()
-  })
-
-  it('should handle self dependency mutations', () => {
-    const count = ref(0)
-    effect(() => {
-      count.value++
-    })
-    expect(count.value).toBe(1)
-    count.value = 10
-    expect(count.value).toBe(11)
   })
 })
