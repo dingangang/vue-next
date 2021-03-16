@@ -129,7 +129,7 @@ function createConfig(format, output, plugins = []) {
         [
           ...Object.keys(pkg.dependencies || {}),
           ...Object.keys(pkg.peerDependencies || {}),
-          ...['path', 'url'] // for @vue/compiler-sfc
+          ...['path', 'url', 'stream'] // for @vue/compiler-sfc / server-renderer
         ]
 
   // the browser builds of @vue/compiler-sfc requires postcss to be available
@@ -235,7 +235,10 @@ function createReplacePlugin(
       replacements[key] = process.env[key]
     }
   })
-  return replace(replacements)
+  return replace({
+    values: replacements,
+    preventAssignment: true
+  })
 }
 
 function createProductionConfig(format) {
@@ -259,7 +262,8 @@ function createMinifiedConfig(format) {
         compress: {
           ecma: 2015,
           pure_getters: true
-        }
+        },
+        safari10: true
       })
     ]
   )

@@ -245,11 +245,14 @@ interface AriaAttributes {
   'aria-valuetext'?: string
 }
 
-export interface HTMLAttributes extends AriaAttributes {
+// Vue's style normalization supports nested arrays
+type StyleValue = string | CSSProperties | Array<StyleValue>
+
+export interface HTMLAttributes extends AriaAttributes, EventHandlers<Events> {
   innerHTML?: string
 
   class?: any
-  style?: string | CSSProperties
+  style?: StyleValue
 
   // Standard HTML Attributes
   accesskey?: string
@@ -734,7 +737,7 @@ export interface WebViewHTMLAttributes extends HTMLAttributes {
   webpreferences?: string
 }
 
-export interface SVGAttributes extends AriaAttributes {
+export interface SVGAttributes extends AriaAttributes, EventHandlers<Events> {
   innerHTML?: string
 
   /**
@@ -1004,6 +1007,7 @@ export interface SVGAttributes extends AriaAttributes {
   xlinkShow?: string
   xlinkTitle?: string
   xlinkType?: string
+  xmlns?: string
   y1?: number | string
   y2?: number | string
   y?: number | string
@@ -1024,7 +1028,6 @@ interface IntrinsicElementAttributes {
   base: BaseHTMLAttributes
   bdi: HTMLAttributes
   bdo: HTMLAttributes
-  big: HTMLAttributes
   blockquote: BlockquoteHTMLAttributes
   body: HTMLAttributes
   br: HTMLAttributes
@@ -1078,7 +1081,6 @@ interface IntrinsicElementAttributes {
   map: MapHTMLAttributes
   mark: HTMLAttributes
   menu: MenuHTMLAttributes
-  menuitem: HTMLAttributes
   meta: MetaHTMLAttributes
   meter: MeterHTMLAttributes
   nav: HTMLAttributes
@@ -1215,6 +1217,8 @@ export interface Events {
 
   // focus events
   onFocus: FocusEvent
+  onFocusin: FocusEvent
+  onFocusout: FocusEvent
   onBlur: FocusEvent
 
   // form events
@@ -1324,7 +1328,7 @@ type ReservedProps = {
     | ((ref: Element | RuntimeCore.ComponentInternalInstance | null) => void)
 }
 
-type ElementAttrs<T> = T & EventHandlers<Events> & ReservedProps
+type ElementAttrs<T> = T & ReservedProps
 
 type NativeElements = {
   [K in StringKeyOf<IntrinsicElementAttributes>]: ElementAttrs<
@@ -1343,7 +1347,7 @@ declare global {
     }
     interface IntrinsicElements extends NativeElements {
       // allow arbitrary elements
-      // @ts-ignore supress ts:2374 = Duplicate string index signature.
+      // @ts-ignore suppress ts:2374 = Duplicate string index signature.
       [name: string]: any
     }
     interface IntrinsicAttributes extends ReservedProps {}

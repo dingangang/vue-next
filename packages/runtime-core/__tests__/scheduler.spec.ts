@@ -4,7 +4,8 @@ import {
   queuePostFlushCb,
   invalidateJob,
   queuePreFlushCb,
-  flushPreFlushCbs
+  flushPreFlushCbs,
+  flushPostFlushCbs
 } from '../src/scheduler'
 
 describe('scheduler', () => {
@@ -41,6 +42,38 @@ describe('scheduler', () => {
       expect(calls).toEqual([])
       await nextTick()
       expect(calls).toEqual(['job1', 'job2'])
+    })
+
+    it("should insert jobs in ascending order of job's id when flushing", async () => {
+      const calls: string[] = []
+      const job1 = () => {
+        calls.push('job1')
+
+        queueJob(job2)
+        queueJob(job3)
+        queueJob(job4)
+      }
+
+      const job2 = () => {
+        calls.push('job2')
+      }
+      job2.id = 10
+
+      const job3 = () => {
+        calls.push('job3')
+      }
+      job3.id = 1
+
+      // job4 gets the Infinity as it's id
+      const job4 = () => {
+        calls.push('job4')
+      }
+
+      queueJob(job1)
+
+      expect(calls).toEqual([])
+      await nextTick()
+      expect(calls).toEqual(['job1', 'job3', 'job2', 'job4'])
     })
 
     it('should dedupe queued jobs', async () => {
@@ -403,6 +436,22 @@ describe('scheduler', () => {
     expect(calls).toEqual(['job3', 'job2', 'job1'])
   })
 
+  test('sort SchedulerCbs based on id', async () => {
+    const calls: string[] = []
+    const cb1 = () => calls.push('cb1')
+    // cb1 has no id
+    const cb2 = () => calls.push('cb2')
+    cb2.id = 2
+    const cb3 = () => calls.push('cb3')
+    cb3.id = 1
+
+    queuePostFlushCb(cb1)
+    queuePostFlushCb(cb2)
+    queuePostFlushCb(cb3)
+    await nextTick()
+    expect(calls).toEqual(['cb3', 'cb2', 'cb1'])
+  })
+
   // #1595
   test('avoid duplicate postFlushCb invocation', async () => {
     const calls: string[] = []
@@ -486,6 +535,26 @@ describe('scheduler', () => {
     job.cb = true
     queueJob(job)
     queueJob(job)
+    await nextTick()
+    expect(count).toBe(1)
+  })
+
+  // #1947 flushPostFlushCbs should handle nested calls
+  // e.g. app.mount inside app.mount
+  test('flushPostFlushCbs', async () => {
+    let count = 0
+
+    const queueAndFlush = (hook: Function) => {
+      queuePostFlushCb(hook)
+      flushPostFlushCbs()
+    }
+
+    queueAndFlush(() => {
+      queueAndFlush(() => {
+        count++
+      })
+    })
+
     await nextTick()
     expect(count).toBe(1)
   })
